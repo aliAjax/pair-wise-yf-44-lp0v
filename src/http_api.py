@@ -71,7 +71,10 @@ def create_handler(service, rules, static_dir):
                 status = 400
             else:
                 status = 500
-            self._send(status, {"error": str(exc), "type": type(exc).__name__})
+            payload = {"error": str(exc), "type": type(exc).__name__}
+            if getattr(exc, "details", None):
+                payload.update(exc.details)
+            self._send(status, payload)
 
         def do_GET(self):
             try:
@@ -116,7 +119,10 @@ def create_handler(service, rules, static_dir):
                     expected = body.pop("expected_version", None)
                     return self._send(
                         200,
-                        service.transition(actor, parts[2], action, data, expected),
+                        service.transition(
+                            actor, parts[2], action, data, expected,
+                            self.headers.get("Idempotency-Key"),
+                        ),
                     )
                 if len(parts) == 4 and parts[0] == "api" and parts[3] == "actions":
                     body = self._body()
@@ -131,12 +137,16 @@ def create_handler(service, rules, static_dir):
                             action,
                             body.pop("data", body),
                             body.pop("expected_version", None),
+                            self.headers.get("Idempotency-Key"),
                         ),
                     )
                 if len(parts) == 5 and parts[0] == "api" and parts[4] == "actions":
                     return self._send(
                         200,
-                        service.transition(actor, parts[2], parts[3], self._body(), None),
+                        service.transition(
+                            actor, parts[2], parts[3], self._body(), None,
+                            self.headers.get("Idempotency-Key"),
+                        ),
                     )
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()

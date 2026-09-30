@@ -4,7 +4,15 @@ from typing import Any, Dict, Optional
 
 
 class DomainError(Exception):
-    """Base error for domain failures."""
+    """Base error for domain failures.
+
+    ``details`` may carry structured conflict information that the HTTP
+    layer merges into the error response (e.g. frozen-entity conflicts).
+    """
+
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details
 
 
 class ValidationError(DomainError):

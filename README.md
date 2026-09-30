@@ -26,13 +26,22 @@ python3 app.py --db ./data.db --port 8310
 
 - `unit`：装置运行状态；`change`：变更申请；`action_item`：风险控制行动项。
 
+## 停车冻结与恢复复核
+
+装置临时停车（`shutdown`）时，该装置下的变更和行动项一并冻结：
+
+- 工程师提交 `implement`、`commission`、`complete`、`verify` 时返回 `409`，响应体包含实体最新版本（`entity`）和冲突项（`conflicts`）。
+- 只有 `safety` 角色在清点后逐项执行 `unfreeze` 解除冻结；其他角色调用返回 `403`。
+- `startup` 前按停车期间的版本变化重算：变更已回退、行动项被重开或负责人改过的保持冻结，并在 `frozen_items` 中列出漂移原因。仍有冻结项时 `startup` 返回 `409`。
+- 所有过渡请求支持 `Idempotency-Key` 请求头。断网重试同一请求不会重复冻结或写审计；服务重启后冻结状态持久化在 SQLite 中，可继续办理解除和复产。
+
 ## 主要接口
 
 - `GET /health`：健康检查。
 - `GET /api/<kind>`：按对象类型查询，可用`?status=`过滤。
 - `POST /api/<kind>`：创建对象；请求体为JSON。
 - `GET /api/entities/<id>`：读取对象当前版本。
-- `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
+- `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`，支持`Idempotency-Key`请求头做幂等重试。
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。

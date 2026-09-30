@@ -51,10 +51,35 @@ class SQLiteRepository:
                     actor_id TEXT NOT NULL,
                     idem_key TEXT NOT NULL,
                     entity_id TEXT NOT NULL,
+                    action TEXT NOT NULL DEFAULT 'create',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS freeze_records (
+                    entity_id TEXT PRIMARY KEY,
+                    unit_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    frozen_version INTEGER NOT NULL,
+                    frozen_status TEXT NOT NULL,
+                    frozen_owner TEXT,
+                    frozen_at TEXT NOT NULL,
+                    unfrozen_at TEXT,
+                    unfrozen_by TEXT,
+                    unfreeze_note TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_freeze_unit
+                    ON freeze_records(unit_id);
             """)
+            self._migrate_idempotency(connection)
+
+    @staticmethod
+    def _migrate_idempotency(connection):
+        """Add the ``action`` column to pre-existing idempotency tables."""
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(idempotency)").fetchall()]
+        if "action" not in columns:
+            connection.execute(
+                "ALTER TABLE idempotency ADD COLUMN action TEXT NOT NULL DEFAULT 'create'"
+            )
 
     @staticmethod
     def _entity_from_row(row):
@@ -183,18 +208,86 @@ class SQLiteRepository:
     def get_idempotency(self, actor_id, idem_key):
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT entity_id FROM idempotency WHERE actor_id = ? AND idem_key = ?",
+                "SELECT entity_id, action FROM idempotency WHERE actor_id = ? AND idem_key = ?",
                 (actor_id, idem_key),
             ).fetchone()
-        return row["entity_id"] if row else None
+        if not row:
+            return None
+        return {"entity_id": row["entity_id"], "action": row["action"]}
 
-    def save_idempotency(self, actor_id, idem_key, entity_id):
+    def save_idempotency(self, actor_id, idem_key, entity_id, action="create"):
         with self._connect() as connection:
             connection.execute(
-                "INSERT OR REPLACE INTO idempotency(actor_id, idem_key, entity_id, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (actor_id, idem_key, entity_id, utcnow()),
+                "INSERT OR REPLACE INTO idempotency(actor_id, idem_key, entity_id, action, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (actor_id, idem_key, entity_id, action, utcnow()),
             )
+
+    # -- freeze records ----------------------------------------------------
+
+    def freeze_entity(self, entity_id, unit_id, kind, version, status, owner):
+        """Record a freeze for ``entity_id``.
+
+        An active freeze record is never overwritten, so re-issuing the
+        shutdown request (network retry) cannot freeze the entity twice.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO freeze_records"
+                "(entity_id, unit_id, kind, frozen_version, frozen_status, frozen_owner, frozen_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (entity_id, unit_id, kind, version, status, owner, utcnow()),
+            )
+
+    def get_freeze(self, entity_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM freeze_records WHERE entity_id = ?", (entity_id,)
+            ).fetchone()
+        return self._freeze_from_row(row) if row else None
+
+    def is_frozen(self, entity_id):
+        record = self.get_freeze(entity_id)
+        return record is not None and record["unfrozen_at"] is None
+
+    def list_frozen(self, unit_id=None, active_only=True):
+        clauses = []
+        params = []
+        if unit_id:
+            clauses.append("unit_id = ?")
+            params.append(unit_id)
+        if active_only:
+            clauses.append("unfrozen_at IS NULL")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM freeze_records" + where + " ORDER BY frozen_at, entity_id",
+                params,
+            ).fetchall()
+        return [self._freeze_from_row(row) for row in rows]
+
+    def unfreeze_entity(self, entity_id, actor_id, note=None):
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE freeze_records SET unfrozen_at = ?, unfrozen_by = ?, unfreeze_note = ? "
+                "WHERE entity_id = ? AND unfrozen_at IS NULL",
+                (utcnow(), actor_id, note, entity_id),
+            )
+
+    @staticmethod
+    def _freeze_from_row(row):
+        return {
+            "entity_id": row["entity_id"],
+            "unit_id": row["unit_id"],
+            "kind": row["kind"],
+            "frozen_version": int(row["frozen_version"]),
+            "frozen_status": row["frozen_status"],
+            "frozen_owner": row["frozen_owner"],
+            "frozen_at": row["frozen_at"],
+            "unfrozen_at": row["unfrozen_at"],
+            "unfrozen_by": row["unfrozen_by"],
+            "unfreeze_note": row["unfreeze_note"],
+        }
 
     def ping(self):
         with self._connect() as connection:
