@@ -48,11 +48,16 @@ CUSTOM_TRANSITIONS = {('change', 'assess'): _validate_assess, ('change', 'approv
 class RuleEngine:
     ALIASES = {'units': 'unit', 'changes': 'change', 'action_items': 'action_item'}
     INITIAL_STATUS = {'unit': 'operating', 'change': 'draft', 'action_item': 'open'}
-    TRANSITIONS = {'unit': {'shutdown': (('operating',), 'shutdown'), 'startup': (('shutdown',), 'operating'), 'freeze': (('operating',), 'frozen'), 'unfreeze': (('frozen',), 'operating')}, 'change': {'assess': (('draft',), 'assessed'), 'approve': (('assessed',), 'approved'), 'implement': (('approved',), 'implemented'), 'commission': (('implemented',), 'commissioned'), 'rollback': (('implemented', 'commissioned'), 'rolled_back'), 'close': (('rolled_back',), 'closed')}, 'action_item': {'complete': (('open',), 'completed'), 'verify': (('completed',), 'verified'), 'reopen': (('verified',), 'open')}}
+    # Overlay actions never change the entity's own status; they manipulate the
+    # shutdown freeze layer and are orchestrated by the service.
+    OVERLAY_ACTIONS = {'release'}
+    TRANSITIONS = {'unit': {'shutdown': (('operating',), 'shutdown'), 'startup': (('shutdown',), 'operating'), 'freeze': (('operating',), 'frozen'), 'unfreeze': (('frozen',), 'operating')}, 'change': {'assess': (('draft',), 'assessed'), 'approve': (('assessed',), 'approved'), 'implement': (('approved',), 'implemented'), 'commission': (('implemented',), 'commissioned'), 'rollback': (('implemented', 'commissioned'), 'rolled_back'), 'close': (('rolled_back',), 'closed')}, 'action_item': {'complete': (('open',), 'completed'), 'verify': (('completed',), 'verified'), 'reopen': (('verified',), 'open'), 'assign': (('open', 'completed', 'verified'), None)}}
     CREATE_REQUIRED = {'unit': ('name', 'location'), 'change': ('unit_id', 'description'), 'action_item': ('change_id', 'description', 'owner')}
-    ACTION_REQUIRED = {('unit', 'shutdown'): ('reason',), ('unit', 'freeze'): ('reason',), ('change', 'assess'): ('risk_level', 'analyst'), ('change', 'approve'): ('approvals', 'permit_id'), ('change', 'implement'): ('procedure_version',), ('change', 'commission'): ('tests_passed',), ('change', 'rollback'): ('reason',), ('change', 'close'): ('outcome',), ('action_item', 'complete'): ('completed_by', 'evidence'), ('action_item', 'verify'): ('verifier',), ('action_item', 'reopen'): ('reason',)}
+    ACTION_REQUIRED = {('unit', 'shutdown'): ('reason',), ('unit', 'freeze'): ('reason',), ('change', 'assess'): ('risk_level', 'analyst'), ('change', 'approve'): ('approvals', 'permit_id'), ('change', 'implement'): ('procedure_version',), ('change', 'commission'): ('tests_passed',), ('change', 'rollback'): ('reason',), ('change', 'close'): ('outcome',), ('action_item', 'complete'): ('completed_by', 'evidence'), ('action_item', 'verify'): ('verifier',), ('action_item', 'reopen'): ('reason',), ('action_item', 'assign'): ('owner',)}
     CREATE_ROLES = {'unit': ('admin', 'engineer'), 'change': ('admin', 'engineer'), 'action_item': ('admin', 'safety')}
-    ROLE_ACTIONS = {'shutdown': ('admin', 'operator'), 'startup': ('admin', 'operator'), 'freeze': ('admin', 'operator'), 'unfreeze': ('admin', 'operator'), 'assess': ('admin', 'engineer'), 'approve': ('admin', 'safety'), 'implement': ('admin', 'engineer'), 'commission': ('admin', 'engineer'), 'rollback': ('admin', 'engineer'), 'close': ('admin', 'safety'), 'complete': ('admin', 'engineer'), 'verify': ('admin', 'verifier'), 'reopen': ('admin', 'verifier')}
+    ROLE_ACTIONS = {'shutdown': ('admin', 'operator'), 'startup': ('admin', 'operator'), 'freeze': ('admin', 'operator'), 'unfreeze': ('admin', 'operator'), 'assess': ('admin', 'engineer'), 'approve': ('admin', 'safety'), 'implement': ('admin', 'engineer'), 'commission': ('admin', 'engineer'), 'rollback': ('admin', 'engineer'), 'close': ('admin', 'safety'), 'complete': ('admin', 'engineer'), 'verify': ('admin', 'verifier'), 'reopen': ('admin', 'verifier'), ('action_item', 'assign'): ('admin', 'safety', 'engineer')}
+    RELEASE_ROLES = ('safety', 'admin')
+    RELEASE_REQUIRED = ('inventory_note',)
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -62,6 +67,26 @@ class RuleEngine:
         if kind not in self.INITIAL_STATUS:
             raise ValidationError("unknown kind: " + str(kind))
         return self.INITIAL_STATUS[kind]
+
+    def validate_release(self, actor, entity, data):
+        """Safety clears a freeze one item at a time after inventory."""
+        kind = self.normalize_kind(entity["kind"])
+        if kind not in ("change", "action_item"):
+            raise InvalidTransition("cannot release %s" % kind)
+        self._ensure_role(actor, self.RELEASE_ROLES)
+        self._require(data, self.RELEASE_REQUIRED)
+        return dict(data)
+
+    @staticmethod
+    def is_shutdown(unit):
+        return bool(unit) and unit["kind"] == "unit" and unit["status"] == "shutdown"
+
+    @staticmethod
+    def unit_id_of(entity):
+        data = entity["data"]
+        if entity["kind"] == "change":
+            return data.get("unit_id")
+        return data.get("unit_id")
 
     @staticmethod
     def _ensure_role(actor, allowed):
@@ -106,7 +131,7 @@ class RuleEngine:
         patch = dict(data)
         if extra:
             patch.update(extra)
-        return next_status, patch
+        return next_status or entity["status"], patch
 
 
 def _find_one(lookup, kind, field, value):

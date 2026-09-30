@@ -27,6 +27,15 @@ class InvalidTransition(DomainError):
     """The requested state transition is not valid."""
 
 
+class FreezeBlocked(ConflictError):
+    """Entity is frozen by a unit shutdown and reports the latest version."""
+
+    def __init__(self, message, entity, conflicts):
+        super().__init__(message)
+        self.entity = entity
+        self.conflicts = conflicts
+
+
 class Role(str, Enum):
     viewer = "viewer"
     admin = "admin"

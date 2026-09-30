@@ -36,6 +36,26 @@ python3 app.py --db ./data.db --port 8310
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
+动作请求可携带`Idempotency-Key`请求头；同一用户用相同键重试相同请求只执行一次（断网重试安全），记录持久化在SQLite中，服务重启后仍然有效。
+
+## 停车冻结与恢复复核
+
+装置临时停车（`unit`执行`shutdown`）后，该装置下所有在途变更（未`closed`）及其行动项被
+**冻结覆盖层**一并冻结（对象自身状态不变）：
+
+- 冻结期间工程师/复核人提交`implement`、`commission`、`complete`、`verify`等动作会被拒绝
+  （HTTP 409，`FreezeBlocked`），响应中带`entity`（最新版本）和`conflicts`（该装置下仍冻结
+  的全部对象及冻结原因）。
+- 只有`safety`（或`admin`）清点后可以对**单个**对象执行`release`解除冻结，
+  必须提供`inventory_note`；解除一项只放一项。
+- 停车期间创建的变更/行动项自动带冻结（`born_frozen`）。
+- `startup`前按停车期间捕获的版本快照逐项重算：
+  - 变更被`rollback`、行动项被`reopen`、或行动项负责人（`owner`，通过`assign`动作修改）
+    变更过的，**保持冻结**并在审计与响应中给出`reblock_reason`，需safety再次解除；
+  - 其余对象自动恢复（审计记录`resume`）。响应包含`resumed`和`still_frozen`两个列表。
+- `shutdown`/`startup`的冻结、审计、幂等记录在同一个SQLite事务中提交。
+
+行动项负责人可用`assign`动作修改（数据需含`owner`），状态不变、版本递增。
 
 ## 测试
 
